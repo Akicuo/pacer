@@ -44,13 +44,15 @@ class PermutationAligner:
             anchor_model: The model to use as the alignment anchor
             peer_models: List of models to align to the anchor
             anchor_strategy: Strategy for selecting anchor (currently uses provided anchor)
-            device: Device for computation (auto-detected if None)
+            device: Device for computation (None = respect model's device placement)
             verbose: Whether to show progress
         """
         self.anchor = anchor_model
         self.peers = peer_models
         self.anchor_strategy = anchor_strategy
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        # If device is None, we'll use weights where they are (multi-GPU friendly)
+        # If specified, we'll move to that device (backward compatibility)
+        self.force_device = device
         self.verbose = verbose
         
         # Store permutations for each peer model
@@ -72,27 +74,64 @@ class PermutationAligner:
         between normalized weight vectors.
         
         Args:
-            w_anchor: Anchor weight matrix (d_out, d_in)
-            w_peer: Peer weight matrix (d_out, d_in)
+            w_anchor: Anchor weight matrix (d_out, d_in) - can be on any device
+            w_peer: Peer weight matrix (d_out, d_in) - can be on any device
             
         Returns:
-            Cost matrix of shape (d_out, d_out)
+            Cost matrix of shape (d_out, d_out) on CPU (for Hungarian algorithm)
         """
-        # Normalize rows to focus on direction, not magnitude
-        w_a_norm = F.normalize(w_anchor.float(), dim=1)
-        w_p_norm = F.normalize(w_peer.float(), dim=1)
+        # Check size to decide strategy
+        d_out, d_in = w_anchor.shape
+        matrix_elements = d_out * d_out
         
-        # Compute similarity matrix (higher = more similar)
-        similarity = torch.mm(w_a_norm, w_p_norm.t())
+        # Determine device to use
+        if self.force_device:
+            # User specified a device - use it (backward compatibility)
+            device = self.force_device
+            use_cpu = device == "cpu"
+        else:
+            # Multi-GPU mode: use weight's current device if small enough, else CPU
+            # Heuristic: if result matrix > 2GB, use CPU
+            # 2GB = 5e8 floats
+            use_cpu = matrix_elements > 5e8
+            device = w_anchor.device if not use_cpu else torch.device("cpu")
         
-        # Return negative for minimization (Hungarian minimizes)
-        return -similarity
+        # Move to target device if needed
+        if use_cpu or str(w_anchor.device) != str(device):
+            w_a = w_anchor.float().to(device)
+            w_p = w_peer.float().to(device)
+        else:
+            w_a = w_anchor.float()
+            w_p = w_peer.float()
+            
+        # Normalize rows
+        w_a_norm = F.normalize(w_a, dim=1)
+        w_p_norm = F.normalize(w_p, dim=1)
+        
+        # Compute similarity matrix
+        if use_cpu and matrix_elements > 2e9: # >8GB result
+            # Chunked computation on CPU to save memory
+            similarity = torch.empty((d_out, d_out), dtype=torch.float32, device=device)
+            chunk_size = 1024
+            for i in range(0, d_out, chunk_size):
+                end = min(i + chunk_size, d_out)
+                similarity[i:end] = torch.mm(w_a_norm[i:end], w_p_norm.t())
+        else:
+            # Standard computation
+            similarity = torch.mm(w_a_norm, w_p_norm.t())
+        
+        # Return on CPU for Hungarian algorithm (scipy needs numpy)
+        return -similarity.cpu()
     
     def _get_linear_layers(self, model: nn.Module) -> Dict[str, nn.Linear]:
-        """Get all linear layers from a model with their full names."""
+        """Get all alignable linear layers (excluding heads)."""
         linear_layers = {}
         for name, module in model.named_modules():
             if isinstance(module, nn.Linear):
+                # Exclude lm_head and other final projection layers
+                # Permuting vocab dimension destroys token semantics
+                if "lm_head" in name or "embed" in name or "score" in name:
+                    continue
                 linear_layers[name] = module
         return linear_layers
     
@@ -172,7 +211,8 @@ class PermutationAligner:
                 continue
             
             anchor_module = anchor_layers[layer_name]
-            w_anchor = anchor_module.weight.data.to(self.device)
+            # Respect model's device placement (multi-GPU friendly)
+            w_anchor = anchor_module.weight.data
             
             # Process each peer model
             for peer_idx, peer in enumerate(self.peers):
@@ -182,37 +222,43 @@ class PermutationAligner:
                     continue
                 
                 peer_module = peer_layers[layer_name]
-                w_peer = peer_module.weight.data.to(self.device)
+                # Keep weights on their original device
+                w_peer = peer_module.weight.data
                 
                 # Apply previous permutation to input dimension
                 prev_perm = self._prev_perms[peer_idx]
                 if prev_perm is not None and prev_perm.shape[0] == w_peer.shape[1]:
-                    w_peer = w_peer[:, prev_perm]
+                    # Move perm to same device as weights
+                    prev_perm_device = prev_perm.to(w_peer.device)
+                    w_peer = w_peer[:, prev_perm_device]
                 
-                # Compute cost matrix
+                # Compute cost matrix (handles device automatically)
                 cost = self._compute_cost_matrix(w_anchor, w_peer)
                 
                 # Solve assignment problem using Hungarian algorithm
-                cost_np = cost.cpu().numpy()
+                cost_np = cost.numpy()  # Already on CPU from _compute_cost_matrix
                 row_ind, col_ind = linear_sum_assignment(cost_np)
                 
                 # col_ind tells us how to reorder peer's output dimension
-                perm = torch.tensor(col_ind, device=self.device, dtype=torch.long)
+                # Keep perm on same device as the weights
+                perm = torch.tensor(col_ind, device=w_peer.device, dtype=torch.long)
                 
                 # Apply output permutation to weights
                 w_peer_aligned = w_peer[perm, :]
-                peer_module.weight.data = w_peer_aligned.to(peer_module.weight.device)
+                peer_module.weight.data = w_peer_aligned
                 
                 # Apply to bias if present
                 if peer_module.bias is not None:
-                    peer_module.bias.data = peer_module.bias.data[perm]
+                    bias_device = peer_module.bias.device
+                    perm_bias = perm.to(bias_device)
+                    peer_module.bias.data = peer_module.bias.data[perm_bias]
                 
                 # Store permutation for this layer
                 self.layer_permutations[peer_idx][layer_name] = perm.cpu()
                 
                 # Update prev_perm for next layer's input (only if shapes match)
                 # This is for layers that feed directly into the next
-                self._prev_perms[peer_idx] = perm
+                self._prev_perms[peer_idx] = perm.cpu()  # Store on CPU to save memory
             
             processed.add(layer_name)
         
