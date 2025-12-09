@@ -1,0 +1,27 @@
+# Example: Merging 4 LLM models with custom thresholds
+
+project_name: "multi-model-merge"
+
+models:
+  - "model-org/model-a"
+  - "model-org/model-b"
+  - "model-org/model-c"
+  - "model-org/model-d"
+
+output:
+  path: "./merged_4way"
+  save_format: "safetensors"
+
+pacer:
+  # Lower threshold = more MoE layers = better capability preservation
+  interference_threshold: 0.25
+  top_k_experts: 2
+  dropout_rate: 0.15
+  anchor_strategy: "lowest_magnitude"
+  enable_moe_upcycle: true
+  expert_cluster_threshold: 0.85
+
+model_config:
+  torch_dtype: "bfloat16"
+  device_map: "auto"
+  trust_remote_code: true

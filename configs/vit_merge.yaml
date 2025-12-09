@@ -1,0 +1,34 @@
+# Example: Merging Vision Transformers with Token Merging
+
+project_name: "vit-merge"
+
+models:
+  - "google/vit-base-patch16-224"
+  - "microsoft/swin-tiny-patch4-window7-224"
+
+output:
+  path: "./merged_vit"
+  save_format: "safetensors"
+
+pacer:
+  interference_threshold: 0.4
+  top_k_experts: 2
+  dropout_rate: 0.1
+  anchor_strategy: "first"
+  enable_moe_upcycle: true
+
+# Vision-specific settings
+vision:
+  # Enable Token Merging for efficiency
+  enable_token_merging: true
+  
+  # Token reduction ratio (0.0-1.0)
+  # Higher = more tokens merged = faster but less detail
+  token_merge_ratio: 0.3
+  
+  # Merge similar patches before MoE routing
+  merge_before_routing: true
+
+model_config:
+  torch_dtype: "float16"
+  device_map: "auto"

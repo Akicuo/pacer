@@ -1,0 +1,72 @@
+# Example configuration for merging Qwen-based coding models
+# Uses two 4B parameter models with compatible architectures
+
+project_name: "qwen-coder-merge"
+
+# Input models - must have same architecture
+models:
+  - "fluently/FluentlyQwen3-Coder-4B-0909"
+  - "SamuelBang/AesCoder-4B"
+
+# Output configuration
+output:
+  path: "./merged_model"
+  save_format: "safetensors"  # or "pytorch"
+  add_timestamp: true  # Add timestamp to output folder name
+  generate_model_card: true  # Auto-generate README.md with merge info
+  
+  # HuggingFace Hub upload settings
+  push_to_hub: false
+  hub_repo: ""  # e.g., "your-username/merged-qwen-coder"
+  # hub_token: ""  # Use HF_TOKEN env var or huggingface-cli login instead
+  private: false  # Set to true for private repository
+
+# PACER algorithm settings
+pacer:
+  # Interference threshold (0.0-1.0)
+  # Higher = more layers get merged, fewer become MoE
+  # Lower = more layers become MoE, better capability preservation
+  interference_threshold: 0.35
+  
+  # Number of experts to activate per token (for MoE layers)
+  top_k_experts: 2
+  
+  # DARE dropout rate for low-interference merging
+  dropout_rate: 0.1
+  
+  # Anchor selection strategy for alignment
+  # Options: "first", "lowest_magnitude", "random"
+  anchor_strategy: "first"
+  
+  # Enable MoE upcycling for high-interference layers
+  # If false, all layers use DARE-TIES merge (may lose capability)
+  enable_moe_upcycle: true
+  
+  # Expert clustering threshold (cosine similarity)
+  # Experts more similar than this are merged together
+  expert_cluster_threshold: 0.9
+
+# Model loading options
+model_config:
+  # Data type for loading models
+  torch_dtype: "bfloat16"  # or "float16", "float32"
+  
+  # Device mapping
+  device_map: "auto"
+  
+  # Trust remote code (required for some models)
+  trust_remote_code: true
+  
+  # Use Flash Attention 2 if available
+  use_flash_attention: true
+
+# Processing options
+processing:
+  # Batch size for alignment cost matrix computation
+  alignment_batch_size: 1000
+  
+  # Show progress bars
+  show_progress: true
+  
+  # Verbose logging
+  verbose: true
