@@ -99,6 +99,7 @@ class PACERMerger:
         self.aligned_models: Optional[List[nn.Module]] = None
         self.consensus_model: Optional[nn.Module] = None
         self.merged_model: Optional[nn.Module] = None
+        self.tokenizer: Optional[Any] = None  # Tokenizer from first model
         
         # Components
         self.aligner: Optional[PermutationAligner] = None
@@ -133,6 +134,24 @@ class PACERMerger:
                 use_flash_attention=self.config.model_config.use_flash_attention,
                 verbose=self.verbose,
             )
+        
+        # Load tokenizer from first model (all should be compatible)
+        if not hasattr(self, 'tokenizer') or self.tokenizer is None:
+            try:
+                from transformers import AutoTokenizer
+                if self.config.models:
+                    self.tokenizer = AutoTokenizer.from_pretrained(
+                        self.config.models[0],
+                        trust_remote_code=self.config.model_config.trust_remote_code,
+                    )
+                    if self.verbose:
+                        print(f"   Loaded tokenizer from: {self.config.models[0]}")
+                else:
+                    self.tokenizer = None
+            except Exception as e:
+                if self.verbose:
+                    print(f"   ⚠️ Could not load tokenizer: {e}")
+                self.tokenizer = None
         
         # Verify compatibility
         verify_architecture_compatibility(self.loaded_models)
@@ -459,6 +478,7 @@ class PACERMerger:
             model=self.merged_model,
             output_path=output_path,
             save_format=format_to_use,
+            tokenizer=getattr(self, 'tokenizer', None),  # Include tokenizer if loaded
             push_to_hub=do_push,
             hub_repo=repo,
             hub_token=token,
