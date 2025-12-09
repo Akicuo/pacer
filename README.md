@@ -1,4 +1,4 @@
-# 🚀 PacerKit
+#  PacerKit
 
 **PACER: Permutation-Aligned Consensus Expert Routing**
 
@@ -9,17 +9,17 @@ A unified framework for base-free, interference-aware model merging in Large Lan
 
 ---
 
-## ✨ Key Features
+##  Key Features
 
-- **🔓 No Base Model Required** - Synthesizes a Consensus Barycenter from input models
-- **🎯 Interference-Aware** - Dynamically decides between merging and MoE upcycling per layer
-- **🧠 Smart Routing** - Zero-shot router using Subspace Projection Affinity (no training needed)
-- **👁️ Vision Support** - Native ViT support with Visual Token Merging (ToMe)
-- **📦 Minimal Parameter Growth** - Only upcycles high-conflict layers to MoE
+- ** No Base Model Required** - Synthesizes a Consensus Barycenter from input models
+- ** Interference-Aware** - Dynamically decides between merging and MoE upcycling per layer
+- ** Smart Routing** - Zero-shot router using Subspace Projection Affinity (no training needed)
+- ** Vision Support** - Native ViT support with Visual Token Merging (ToMe)
+- ** Minimal Parameter Growth** - Only upcycles high-conflict layers to MoE
 
 ---
 
-## 📦 Installation
+##  Installation
 
 ### Quick Install
 
@@ -38,7 +38,7 @@ pip install -r requirements.txt
 
 ---
 
-## 🚀 Quick Start
+##  Quick Start
 
 ### Python API
 
@@ -75,7 +75,7 @@ See [`notebooks/pacer_quickstart.ipynb`](notebooks/pacer_quickstart.ipynb) for a
 
 ---
 
-## ⚙️ Configuration
+##  Configuration
 
 PacerKit uses YAML configuration files:
 
@@ -102,7 +102,7 @@ See [`configs/`](configs/) for more examples.
 
 ---
 
-## 🔬 How It Works
+##  How It Works
 
 PACER operates in three phases:
 
@@ -118,7 +118,7 @@ Computes the Fréchet Mean of aligned models to create a synthetic "base model",
 
 ---
 
-## 📊 Performance
+##  Performance
 
 | Metric | Dense Ensemble (4x) | Standard MoE | PACER |
 |--------|---------------------|--------------|-------|
