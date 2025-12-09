@@ -175,6 +175,8 @@ class PACERMerger:
             peer_models=peers,
             anchor_strategy=self.config.pacer.anchor_strategy,
             verbose=self.verbose,
+            num_workers=self.config.processing.num_workers,
+            fast_mode=self.config.processing.fast_mode,
         )
         
         aligned_peers = self.aligner.align()

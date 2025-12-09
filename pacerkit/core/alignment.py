@@ -36,6 +36,8 @@ class PermutationAligner:
         anchor_strategy: Literal["first", "lowest_magnitude", "random"] = "first",
         device: Optional[str] = None,
         verbose: bool = True,
+        num_workers: int = 4,
+        fast_mode: bool = True,
     ):
         """
         Initialize the permutation aligner.
@@ -46,6 +48,8 @@ class PermutationAligner:
             anchor_strategy: Strategy for selecting anchor (currently uses provided anchor)
             device: Device for computation (None = respect model's device placement)
             verbose: Whether to show progress
+            num_workers: Number of parallel workers for peer alignment (default: 4)
+            fast_mode: Use approximations for large layers (default: True)
         """
         self.anchor = anchor_model
         self.peers = peer_models
@@ -54,6 +58,8 @@ class PermutationAligner:
         # If specified, we'll move to that device (backward compatibility)
         self.force_device = device
         self.verbose = verbose
+        self.num_workers = num_workers
+        self.fast_mode = fast_mode
         
         # Store permutations for each peer model
         # Each entry is a dict mapping layer names to permutation vectors
@@ -122,6 +128,58 @@ class PermutationAligner:
         
         # Return on CPU for Hungarian algorithm (scipy needs numpy)
         return -similarity.cpu()
+    
+    def _solve_assignment(
+        self,
+        cost: torch.Tensor,
+        fast_mode: bool = None,
+    ) -> torch.Tensor:
+        """
+        Solve the linear assignment problem.
+        
+        Args:
+            cost: Cost matrix (n, n) on CPU
+            fast_mode: Use greedy approximation for large matrices (default: self.fast_mode)
+            
+        Returns:
+            Permutation tensor (column indices)
+        """
+        fast_mode = fast_mode if fast_mode is not None else self.fast_mode
+        n = cost.shape[0]
+        
+        # Use greedy approximation for large layers in fast mode
+        if fast_mode and n > 512:
+            # Greedy matching: for each row, pick the best column
+            # Not optimal but O(n²) instead of O(n³)
+            # And often good enough for weight alignment
+            perm = torch.zeros(n, dtype=torch.long)
+            cost_np = cost.numpy()
+            
+            # Track which columns are taken
+            available = set(range(n))
+            
+            # Sort rows by their minimum cost (process hardest first)
+            row_mins = cost_np.min(axis=1)
+            row_order = row_mins.argsort()
+            
+            for row in row_order:
+                # Find best available column for this row
+                best_col = None
+                best_cost = float('inf')
+                for col in available:
+                    if cost_np[row, col] < best_cost:
+                        best_cost = cost_np[row, col]
+                        best_col = col
+                
+                perm[row] = best_col
+                available.remove(best_col)
+            
+            return perm
+        else:
+            # Use exact Hungarian algorithm for small/medium layers
+            cost_np = cost.numpy()
+            row_ind, col_ind = linear_sum_assignment(cost_np)
+            return torch.tensor(col_ind, dtype=torch.long)
     
     def _get_linear_layers(self, model: nn.Module) -> Dict[str, nn.Linear]:
         """Get all alignable linear layers (excluding heads)."""
@@ -214,12 +272,18 @@ class PermutationAligner:
             # Respect model's device placement (multi-GPU friendly)
             w_anchor = anchor_module.weight.data
             
-            # Process each peer model
-            for peer_idx, peer in enumerate(self.peers):
+            # Skip very small layers (< 32 neurons) - not worth aligning
+            if w_anchor.shape[0] < 32:
+                processed.add(layer_name)
+                continue
+            
+            # Define processing function for a single peer
+            def process_peer(peer_idx):
+                peer = self.peers[peer_idx]
                 peer_layers = self._get_linear_layers(peer)
                 
                 if layer_name not in peer_layers:
-                    continue
+                    return None
                 
                 peer_module = peer_layers[layer_name]
                 # Keep weights on their original device
@@ -235,13 +299,11 @@ class PermutationAligner:
                 # Compute cost matrix (handles device automatically)
                 cost = self._compute_cost_matrix(w_anchor, w_peer)
                 
-                # Solve assignment problem using Hungarian algorithm
-                cost_np = cost.numpy()  # Already on CPU from _compute_cost_matrix
-                row_ind, col_ind = linear_sum_assignment(cost_np)
+                # Solve assignment problem (fast mode for large layers)
+                col_ind = self._solve_assignment(cost)
                 
-                # col_ind tells us how to reorder peer's output dimension
-                # Keep perm on same device as the weights
-                perm = torch.tensor(col_ind, device=w_peer.device, dtype=torch.long)
+                # Keep perm on same device as the weights  
+                perm = col_ind.to(w_peer.device)
                 
                 # Apply output permutation to weights
                 w_peer_aligned = w_peer[perm, :]
@@ -253,12 +315,27 @@ class PermutationAligner:
                     perm_bias = perm.to(bias_device)
                     peer_module.bias.data = peer_module.bias.data[perm_bias]
                 
-                # Store permutation for this layer
-                self.layer_permutations[peer_idx][layer_name] = perm.cpu()
-                
-                # Update prev_perm for next layer's input (only if shapes match)
-                # This is for layers that feed directly into the next
-                self._prev_perms[peer_idx] = perm.cpu()  # Store on CPU to save memory
+                return perm.cpu()  # Return on CPU for storage
+            
+            # Process peers in parallel if multiple workers
+            if self.num_workers > 1 and len(self.peers) > 1:
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+                    peer_indices = list(range(len(self.peers)))
+                    results = list(executor.map(process_peer, peer_indices))
+                    
+                    # Store results
+                    for peer_idx, perm in enumerate(results):
+                        if perm is not None:
+                            self.layer_permutations[peer_idx][layer_name] = perm
+                            self._prev_perms[peer_idx] = perm
+            else:
+                # Sequential processing (single worker or single peer)
+                for peer_idx in range(len(self.peers)):
+                    perm = process_peer(peer_idx)
+                    if perm is not None:
+                        self.layer_permutations[peer_idx][layer_name] = perm
+                        self._prev_perms[peer_idx] = perm
             
             processed.add(layer_name)
         

@@ -70,3 +70,10 @@ processing:
   
   # Verbose logging
   verbose: true
+  
+  # Parallel workers for alignment (more = faster)
+  num_workers: 4
+  
+  # Fast mode: use greedy approximation for large layers (>512 neurons)
+  # Set to false for exact Hungarian algorithm (slower but optimal)
+  fast_mode: true

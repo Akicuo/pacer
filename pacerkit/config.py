@@ -56,6 +56,8 @@ class ProcessingSettings:
     alignment_batch_size: int = 1000
     show_progress: bool = True
     verbose: bool = True
+    num_workers: int = 4  # Parallel workers for alignment
+    fast_mode: bool = True  # Use approximations for large layers
 
 
 @dataclass
