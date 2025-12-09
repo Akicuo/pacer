@@ -63,7 +63,7 @@ merged_model = merger.merge(
 
 ```bash
 # Merge models using a config file
-pacerkit merge --config configs/qwen_coder_merge.yaml
+pacerwkit merge --config configs/qwen_coder_merge.yaml
 
 # Analyze interference between models
 pacerkit analyze --models model1 model2 --output report.json
