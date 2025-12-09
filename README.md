@@ -24,8 +24,8 @@ A unified framework for base-free, interference-aware model merging in Large Lan
 ### Quick Install
 
 ```bash
-git clone https://github.com/yourusername/pacerkit.git
-cd pacerkit
+git clone https://github.com/Akicuo/pacer.git
+cd pacer
 pip install -e .
 ```
 
