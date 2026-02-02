@@ -37,6 +37,37 @@ pip install torch transformers safetensors accelerate
 pip install -r requirements.txt
 ```
 
+### Requirements
+
+- Python 3.9+
+- torch
+- transformers
+- safetensors
+- accelerate
+- huggingface_hub
+- scipy
+- numpy
+- scikit-learn
+- pyyaml
+- tqdm
+- click
+- vllm
+- ipykernel
+- ipywidgets
+
+### Docker (CUDA)
+
+```bash
+# Build with vLLM installed
+docker build -t pacerkit .
+
+# Build without vLLM
+docker build -t pacerkit --build-arg INSTALL_VLLM=0 .
+
+# Run (requires NVIDIA Container Toolkit)
+docker run --gpus all -it --rm pacerkit
+```
+
 ---
 
 ##  Quick Start
