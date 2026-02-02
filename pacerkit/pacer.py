@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
-from pacerkit.config import PACERConfig, load_config
+from pacerkit.config import PACERConfig, load_config, load_config_from_dict
 from pacerkit.core.alignment import PermutationAligner
 from pacerkit.core.consensus import ConsensusEngine
 from pacerkit.core.interference import InterferenceAnalyzer
@@ -25,6 +25,7 @@ from pacerkit.utils.model_io import (
     verify_architecture_compatibility,
     get_model_architecture_info,
 )
+from pacerkit.utils.activation import collect_activations
 
 
 class PACERMerger:
@@ -61,7 +62,7 @@ class PACERMerger:
     def __init__(
         self,
         models: Optional[List[Union[str, nn.Module]]] = None,
-        config: Optional[Union[str, Path, PACERConfig]] = None,
+        config: Optional[Union[str, Path, PACERConfig, Dict[str, Any]]] = None,
         verbose: bool = True,
     ):
         """
@@ -69,7 +70,7 @@ class PACERMerger:
         
         Args:
             models: List of model paths/IDs or pre-loaded models
-            config: Configuration file path or PACERConfig instance
+            config: Configuration file path, dict, or PACERConfig instance
             verbose: Whether to show progress output
         """
         self.verbose = verbose
@@ -82,6 +83,8 @@ class PACERMerger:
         if config is not None:
             if isinstance(config, (str, Path)):
                 self.config = load_config(config)
+            elif isinstance(config, dict):
+                self.config = load_config_from_dict(config)
             else:
                 self.config = config
         else:
@@ -110,6 +113,8 @@ class PACERMerger:
         # Results
         self.interference_report: Dict[str, Tuple[float, str]] = {}
         self.moe_layers: Dict[str, PACER_MoE_Layer] = {}
+        self.activation_report: Dict[str, Any] = {}
+        self.keep_overrides: Dict[str, Dict[str, Any]] = {}
     
     def load_models(self) -> List[nn.Module]:
         """
@@ -307,9 +312,11 @@ class PACERMerger:
         
         # Run pipeline
         self.load_models()
+        self._collect_activation_stats()
         self.align()
         self.compute_consensus()
         self.analyze_interference()
+        self._prepare_keep_overrides()
         
         # Phase 4: Build merged model
         if self.verbose:
@@ -349,6 +356,10 @@ class PACERMerger:
         )
         
         moe_builder = MoEBuilder(top_k=self.config.pacer.top_k_experts)
+        keep_map = self.keep_overrides.get("param_sources", {})
+        aligned_states = [
+            model.state_dict() for model in (self.aligned_models or [])
+        ]
         
         # Process each layer based on interference decision
         for layer_name, (score, decision) in tqdm(
@@ -359,6 +370,11 @@ class PACERMerger:
             try:
                 deviations = self.consensus_engine.get_layer_deviations(layer_name)
                 consensus_param = consensus_state[layer_name]
+                
+                if layer_name in keep_map:
+                    src_idx = keep_map[layer_name]
+                    merged_state[layer_name] = aligned_states[src_idx][layer_name]
+                    continue
                 
                 if decision == "merge":
                     # DARE-TIES merge
@@ -394,10 +410,126 @@ class PACERMerger:
                 if self.verbose:
                     print(f"   ⚠ Error processing {layer_name}: {e}")
         
+        # Apply activation-guided overrides to any remaining parameters
+        for param_name, src_idx in keep_map.items():
+            if param_name in merged_state and param_name in aligned_states[src_idx]:
+                merged_state[param_name] = aligned_states[src_idx][param_name]
+        
         # Load merged state
         merged.load_state_dict(merged_state)
         
         return merged
+
+    def _collect_activation_stats(self) -> None:
+        """Collect activation stats and build keep overrides if enabled."""
+        if not self.config.activation.enabled:
+            return
+        
+        if not self.config.model_prompts:
+            raise ValueError(
+                "Activation-based merge is enabled but no model prompts were provided."
+            )
+        
+        if self.verbose:
+            print("\n🧠 Phase 0: Activation Collection")
+        
+        self.activation_report = collect_activations(
+            model_prompts=self.config.model_prompts,
+            settings=self.config.activation,
+            trust_remote_code=self.config.model_config.trust_remote_code,
+        )
+
+    def _prepare_keep_overrides(self) -> None:
+        """Create keep overrides once consensus is available."""
+        if not self.config.activation.enabled:
+            return
+        if not self.activation_report:
+            return
+        self.keep_overrides = self._build_keep_overrides()
+
+    def _build_keep_overrides(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Build parameter overrides based on activation stats.
+        
+        Returns:
+            Dict with param_sources mapping and metadata for reporting.
+        """
+        keep_param_sources: Dict[str, int] = {}
+        keep_param_meta: Dict[str, Dict[str, Any]] = {}
+        
+        model_stats = self.activation_report.get("models", {})
+        if not model_stats:
+            return {"param_sources": keep_param_sources, "param_meta": keep_param_meta}
+        
+        param_names = list(self.consensus_model.state_dict().keys()) if self.consensus_model else []
+        for model_idx, model_id in enumerate(self.config.models):
+            stats = model_stats.get(model_id, {})
+            layer_scores = stats.get("layers", {})
+            expert_scores = stats.get("experts", {})
+            
+            selected_layers = _select_top_items(
+                layer_scores,
+                self.config.activation.keep_top_layers,
+                self.config.activation.min_activation_score,
+            )
+            for layer_name, score in selected_layers.items():
+                _update_param_overrides(
+                    keep_param_sources,
+                    keep_param_meta,
+                    param_names,
+                    layer_name,
+                    model_idx,
+                    model_id,
+                    score,
+                    target_type="layer",
+                )
+            
+            for layer_name, experts in expert_scores.items():
+                selected_experts = _select_top_items(
+                    experts,
+                    self.config.activation.keep_top_experts_per_layer,
+                    self.config.activation.min_activation_score,
+                )
+                for expert_id, score in selected_experts.items():
+                    expert_prefix = f"{layer_name}.experts.{expert_id}"
+                    _update_param_overrides(
+                        keep_param_sources,
+                        keep_param_meta,
+                        param_names,
+                        expert_prefix,
+                        model_idx,
+                        model_id,
+                        score,
+                        target_type="expert",
+                        target_id=str(expert_id),
+                    )
+        
+        return {"param_sources": keep_param_sources, "param_meta": keep_param_meta}
+
+    def _build_activation_summary(self) -> Dict[str, Any]:
+        """Build a concise activation summary for reports and README."""
+        if not self.config.activation.enabled:
+            return {"enabled": False}
+        
+        keep_sources = self.keep_overrides.get("param_sources", {})
+        keep_meta = self.keep_overrides.get("param_meta", {})
+        keep_by_model: Dict[str, int] = {model_id: 0 for model_id in self.config.models}
+        for param_name, meta in keep_meta.items():
+            model_id = meta.get("model_id")
+            if model_id in keep_by_model:
+                keep_by_model[model_id] += 1
+        
+        return {
+            "enabled": True,
+            "backend": self.activation_report.get("backend", self.config.activation.backend),
+            "settings": self.activation_report.get("settings", {}),
+            "model_prompts": [
+                {"hf_id": cfg.hf_id, "p_prompts": cfg.p_prompts}
+                for cfg in self.config.model_prompts
+            ],
+            "keep_parameters": len(keep_sources),
+            "keep_by_model": keep_by_model,
+        }
     
     def _print_summary(self) -> None:
         """Print merge summary."""
@@ -463,6 +595,7 @@ class PACERMerger:
             print(f"\n💾 Saving to: {output_path}")
         
         # Build merge config for model card
+        activation_summary = self._build_activation_summary()
         merge_config = {
             "project_name": self.config.project_name,
             "models": self.config.models,
@@ -471,6 +604,7 @@ class PACERMerger:
                 "top_k_experts": self.config.pacer.top_k_experts,
             },
             "summary": self.interference_analyzer.get_summary() if self.interference_analyzer else {},
+            "activation": activation_summary,
         }
         
         # Save model with optional Hub upload
@@ -509,6 +643,7 @@ class PACERMerger:
                 "top_k_experts": self.config.pacer.top_k_experts,
             },
             "summary": self.interference_analyzer.get_summary() if self.interference_analyzer else {},
+            "activation": self._build_activation_summary(),
             "layer_decisions": {
                 name: {"score": score, "decision": decision}
                 for name, (score, decision) in self.interference_report.items()
@@ -517,6 +652,7 @@ class PACERMerger:
                 name: {"num_experts": info["num_experts"], "score": info["score"]}
                 for name, info in self.moe_layers.items()
             },
+            "keep_overrides": self.keep_overrides.get("param_meta", {}),
         }
         
         with open(path, "w", encoding="utf-8") as f:
@@ -533,6 +669,44 @@ class PACERMerger:
             "summary": self.interference_analyzer.get_summary() if self.interference_analyzer else {},
             "layers": self.interference_report,
             "high_interference": self.interference_analyzer.get_high_interference_layers(10) if self.interference_analyzer else [],
+        }
+
+
+def _select_top_items(
+    scores: Dict[str, float],
+    top_k: Optional[int],
+    min_score: float,
+) -> Dict[str, float]:
+    filtered = {k: v for k, v in scores.items() if v >= min_score}
+    if top_k is None:
+        return filtered
+    return dict(sorted(filtered.items(), key=lambda item: item[1], reverse=True)[:top_k])
+
+
+def _update_param_overrides(
+    keep_param_sources: Dict[str, int],
+    keep_param_meta: Dict[str, Dict[str, Any]],
+    param_names: List[str],
+    prefix: str,
+    model_idx: int,
+    model_id: str,
+    score: float,
+    target_type: str,
+    target_id: Optional[str] = None,
+) -> None:
+    for param_name in param_names:
+        if not param_name.startswith(prefix + "."):
+            continue
+        existing = keep_param_meta.get(param_name)
+        if existing and existing.get("score", 0.0) >= score:
+            continue
+        keep_param_sources[param_name] = model_idx
+        keep_param_meta[param_name] = {
+            "model_id": model_id,
+            "score": score,
+            "target_type": target_type,
+            "target_id": target_id,
+            "prefix": prefix,
         }
 
 

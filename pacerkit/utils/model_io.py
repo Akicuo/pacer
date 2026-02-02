@@ -340,6 +340,7 @@ def _generate_model_card(merge_config: Dict[str, Any]) -> str:
         Model card content as markdown string
     """
     import datetime
+    import json
     
     models = merge_config.get("models", [])
     project_name = merge_config.get("project_name", "PACER Merged Model")
@@ -348,8 +349,30 @@ def _generate_model_card(merge_config: Dict[str, Any]) -> str:
     
     merged_layers = merge_config.get("summary", {}).get("merge_layers", "N/A")
     moe_layers = merge_config.get("summary", {}).get("moe_layers", "N/A")
+    activation_info = merge_config.get("activation", {}) or {}
+    activation_enabled = activation_info.get("enabled", False)
     
     model_list = "\n".join([f"- `{m}`" for m in models])
+    
+    full_config_json = json.dumps(merge_config, indent=2, default=str)
+    
+    activation_section = ""
+    if activation_enabled:
+        keep_params = activation_info.get("keep_parameters", 0)
+        keep_by_model = activation_info.get("keep_by_model", {})
+        model_lines = "\n".join(
+            [f"- `{model}`: {count}" for model, count in keep_by_model.items()]
+        )
+        activation_section = f"""
+## Activation-Guided Retention
+
+**Backend:** `{activation_info.get('backend', 'vllm')}`
+
+**Kept Parameters:** `{keep_params}`
+
+**Kept Parameters by Model:**
+{model_lines}
+"""
     
     card = f"""---
 library_name: transformers
@@ -377,6 +400,7 @@ This model was created using **PACER (Permutation-Aligned Consensus Expert Routi
 - Top-K Experts: `{top_k}`
 - Merged Layers: `{merged_layers}`
 - MoE Layers: `{moe_layers}`
+{activation_section}
 
 ## How PACER Works
 
@@ -403,6 +427,12 @@ outputs = model.generate(**inputs)
 ## Created With
 
 [PacerKit](https://github.com/yourusername/pacerkit) - PACER Model Merging Framework
+
+## Full Merge Configuration
+
+```json
+{full_config_json}
+```
 
 **Created:** {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 """

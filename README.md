@@ -16,6 +16,7 @@ A unified framework for base-free, interference-aware model merging in Large Lan
 - **Smart Routing** - Zero-shot router using Subspace Projection Affinity (no training needed)
 - **Vision Support** - Native ViT support with Visual Token Merging (ToMe)
 - **Minimal Parameter Growth** - Only upcycles high-conflict layers to MoE
+- **Activation-Guided Retention** - Keep activated layers/experts from dense or MoE models via vLLM prompts
 
 ---
 
@@ -36,6 +37,37 @@ pip install torch transformers safetensors accelerate
 pip install -r requirements.txt
 ```
 
+### Requirements
+
+- Python 3.9+
+- torch
+- transformers
+- safetensors
+- accelerate
+- huggingface_hub
+- scipy
+- numpy
+- scikit-learn
+- pyyaml
+- tqdm
+- click
+- vllm
+- ipykernel
+- ipywidgets
+
+### Docker (CUDA)
+
+```bash
+# Build with vLLM installed
+docker build -t pacerkit .
+
+# Build without vLLM
+docker build -t pacerkit --build-arg INSTALL_VLLM=0 .
+
+# Run (requires NVIDIA Container Toolkit)
+docker run --gpus all -it --rm pacerkit
+```
+
 ---
 
 ##  Quick Start
@@ -45,11 +77,32 @@ pip install -r requirements.txt
 ```python
 from pacerkit import PACERMerger
 
-# Initialize merger with models
-merger = PACERMerger([
-    "fluently/FluentlyQwen3-Coder-4B-0909",
-    "SamuelBang/AesCoder-4B"
-])
+# can be None or {} to use default merging method
+# merge_config = None
+# merge_config = {}
+
+# set to use activated experts or layers through vllm inference and p(ositive) prompts
+merge_config = {
+    "models": [
+        {
+            "hf_id": "fluently/FluentlyQwen3-Coder-4B-0909",
+            "p_prompts": [
+                "Write a Typescript function that requests a chat completion through the OpenAI Client",
+                "Golang function that checks whether any foreign requests are being sent to third parties"
+            ]
+        },
+        {
+            "hf_id": "SamuelBang/AesCoder-4B",
+            "p_prompts": [
+                "Using HTML CSS JS and React - make a beautiful responsive landing page",
+                "Using HTML CSS JS and Tailwind via cdn - Design a brutalist minimaist ecommerce webpage"
+            ]
+        }
+    ]
+}
+
+# Initialize merger with models (everything is set in merge_config)
+merger = PACERMerger(config=merge_config)
 
 # Run PACER merge pipeline
 merged_model = merger.merge(
@@ -63,7 +116,7 @@ merged_model = merger.merge(
 
 ```bash
 # Merge models using a config file
-pacerwkit merge --config configs/qwen_coder_merge.yaml
+pacerkit merge --config configs/qwen_coder_merge.yaml
 
 # Analyze interference between models
 pacerkit analyze --models model1 model2 --output report.json
@@ -98,7 +151,46 @@ pacer:
   enable_moe_upcycle: true
 ```
 
+### Activation-Guided YAML Example
+
+```yaml
+project_name: "activation-guided-merge"
+
+models:
+  - hf_id: "fluently/FluentlyQwen3-Coder-4B-0909"
+    p_prompts:
+      - "Write a Typescript function that requests a chat completion through the OpenAI Client"
+      - "Golang function that checks whether any foreign requests are being sent to third parties"
+  - hf_id: "SamuelBang/AesCoder-4B"
+    p_prompts:
+      - "Using HTML CSS JS and React - make a beautiful responsive landing page"
+      - "Using HTML CSS JS and Tailwind via cdn - Design a brutalist minimaist ecommerce webpage"
+
+activation:
+  enabled: true
+  backend: "vllm"
+  keep_top_layers: 10
+  keep_top_experts_per_layer: 2
+  min_activation_score: 0.0
+  max_prompts: 8
+  max_tokens: 1
+  temperature: 0.0
+
+output:
+  path: "./merged_model"
+  save_format: "safetensors"
+
+pacer:
+  interference_threshold: 0.35
+  top_k_experts: 2
+  dropout_rate: 0.1
+  anchor_strategy: "first"
+  enable_moe_upcycle: true
+```
+
 See [`configs/`](configs/) for more examples.
+
+Activation-guided merging can also be configured via dict input (see Python API) or YAML with prompt lists and activation settings. The merge output folder automatically includes a `README.md` and `merge_config.json` describing the merge and activation retention.
 
 ---
 
