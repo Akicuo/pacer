@@ -10,6 +10,26 @@ import yaml
 
 
 @dataclass
+class ModelPromptConfig:
+    """Per-model prompt configuration for activation collection."""
+    hf_id: str
+    p_prompts: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ActivationSettings:
+    """Activation-guided merge settings."""
+    enabled: bool = False
+    backend: Literal["vllm", "transformers"] = "vllm"
+    keep_top_layers: Optional[int] = None
+    keep_top_experts_per_layer: Optional[int] = None
+    min_activation_score: float = 0.0
+    max_prompts: Optional[int] = None
+    max_tokens: int = 1
+    temperature: float = 0.0
+
+
+@dataclass
 class OutputConfig:
     """Output configuration settings."""
     path: str = "./merged_model"
@@ -81,6 +101,8 @@ class PACERConfig:
     model_config: ModelSettings = field(default_factory=ModelSettings)
     vision: VisionSettings = field(default_factory=VisionSettings)
     processing: ProcessingSettings = field(default_factory=ProcessingSettings)
+    activation: ActivationSettings = field(default_factory=ActivationSettings)
+    model_prompts: List[ModelPromptConfig] = field(default_factory=list)
     
     def validate(self) -> None:
         """Validate configuration settings."""
@@ -99,6 +121,16 @@ class PACERConfig:
         if self.vision.enable_token_merging:
             if not 0.0 <= self.vision.token_merge_ratio <= 1.0:
                 raise ValueError("token_merge_ratio must be between 0.0 and 1.0")
+        
+        if self.activation.enabled and self.model_prompts:
+            prompt_ids = {p.hf_id for p in self.model_prompts}
+            model_ids = set(self.models)
+            missing = prompt_ids - model_ids
+            if missing:
+                raise ValueError(
+                    "Activation prompts reference models not in config: "
+                    + ", ".join(sorted(missing))
+                )
 
 
 def _dict_to_dataclass(data: Dict[str, Any], cls: type) -> Any:
@@ -109,6 +141,68 @@ def _dict_to_dataclass(data: Dict[str, Any], cls: type) -> Any:
     field_names = {f.name for f in cls.__dataclass_fields__.values()}
     filtered = {k: v for k, v in data.items() if k in field_names}
     return cls(**filtered)
+
+
+def _parse_models(
+    raw_models: List[Union[str, Dict[str, Any]]]
+) -> tuple[List[str], List[ModelPromptConfig]]:
+    """Parse models list into hf_id list and optional prompt configs."""
+    model_ids: List[str] = []
+    prompt_configs: List[ModelPromptConfig] = []
+    
+    for item in raw_models:
+        if isinstance(item, dict):
+            hf_id = item.get("hf_id") or item.get("model") or item.get("id")
+            if not hf_id:
+                raise ValueError("Model config requires 'hf_id'")
+            p_prompts = item.get("p_prompts", []) or []
+            model_ids.append(hf_id)
+            prompt_configs.append(ModelPromptConfig(hf_id=hf_id, p_prompts=p_prompts))
+        else:
+            model_ids.append(str(item))
+    
+    return model_ids, prompt_configs
+
+
+def load_config_from_dict(raw_config: Dict[str, Any]) -> PACERConfig:
+    """
+    Load PACER configuration from a dictionary.
+    
+    Args:
+        raw_config: Configuration dictionary
+        
+    Returns:
+        PACERConfig instance
+    """
+    raw_config = raw_config or {}
+    
+    # Parse nested configs
+    output = _dict_to_dataclass(raw_config.get("output", {}), OutputConfig)
+    pacer = _dict_to_dataclass(raw_config.get("pacer", {}), PACERSettings)
+    model_config = _dict_to_dataclass(raw_config.get("model_config", {}), ModelSettings)
+    vision = _dict_to_dataclass(raw_config.get("vision", {}), VisionSettings)
+    processing = _dict_to_dataclass(raw_config.get("processing", {}), ProcessingSettings)
+    activation = _dict_to_dataclass(raw_config.get("activation", {}), ActivationSettings)
+    
+    raw_models = raw_config.get("models", [])
+    models, model_prompts = _parse_models(raw_models)
+    if model_prompts and not activation.enabled:
+        activation.enabled = True
+    
+    config = PACERConfig(
+        project_name=raw_config.get("project_name", "pacer-merge"),
+        models=models,
+        output=output,
+        pacer=pacer,
+        model_config=model_config,
+        vision=vision,
+        processing=processing,
+        activation=activation,
+        model_prompts=model_prompts,
+    )
+    
+    config.validate()
+    return config
 
 
 def load_config(config_path: Union[str, Path]) -> PACERConfig:
@@ -136,24 +230,8 @@ def load_config(config_path: Union[str, Path]) -> PACERConfig:
     if raw_config is None:
         raise ValueError(f"Empty configuration file: {config_path}")
     
-    # Parse nested configs
-    output = _dict_to_dataclass(raw_config.get("output", {}), OutputConfig)
-    pacer = _dict_to_dataclass(raw_config.get("pacer", {}), PACERSettings)
-    model_config = _dict_to_dataclass(raw_config.get("model_config", {}), ModelSettings)
-    vision = _dict_to_dataclass(raw_config.get("vision", {}), VisionSettings)
-    processing = _dict_to_dataclass(raw_config.get("processing", {}), ProcessingSettings)
+    config = load_config_from_dict(raw_config)
     
-    config = PACERConfig(
-        project_name=raw_config.get("project_name", "pacer-merge"),
-        models=raw_config.get("models", []),
-        output=output,
-        pacer=pacer,
-        model_config=model_config,
-        vision=vision,
-        processing=processing,
-    )
-    
-    config.validate()
     return config
 
 
