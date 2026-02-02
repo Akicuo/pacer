@@ -11,11 +11,11 @@ A unified framework for base-free, interference-aware model merging in Large Lan
 
 ##  Key Features
 
-- ** No Base Model Required** - Synthesizes a Consensus Barycenter from input models
-- ** Interference-Aware** - Dynamically decides between merging and MoE upcycling per layer
-- ** Smart Routing** - Zero-shot router using Subspace Projection Affinity (no training needed)
-- ** Vision Support** - Native ViT support with Visual Token Merging (ToMe)
-- ** Minimal Parameter Growth** - Only upcycles high-conflict layers to MoE
+- **No Base Model Required** - Synthesizes a Consensus Barycenter from input models
+- **Interference-Aware** - Dynamically decides between merging and MoE upcycling per layer
+- **Smart Routing** - Zero-shot router using Subspace Projection Affinity (no training needed)
+- **Vision Support** - Native ViT support with Visual Token Merging (ToMe)
+- **Minimal Parameter Growth** - Only upcycles high-conflict layers to MoE
 
 ---
 
@@ -155,3 +155,4 @@ Built on research from:
 - TIES-Merging (Yadav et al.)
 - Token Merging (Bolya et al.)
 - MergeME (Model Merging for MoEs)
+- Claude Code Max for helping me through this Project <3
