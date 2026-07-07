@@ -508,7 +508,8 @@ def get_model_architecture_info(model: nn.Module) -> Dict[str, Any]:
         info["num_hidden_layers"] = getattr(config, "num_hidden_layers", None)
         info["num_attention_heads"] = getattr(config, "num_attention_heads", None)
         info["vocab_size"] = getattr(config, "vocab_size", None)
-        info["architecture"] = getattr(config, "architectures", [None])[0]
+        architectures = getattr(config, "architectures", None)
+        info["architecture"] = architectures[0] if architectures else None
     
     return info
 
